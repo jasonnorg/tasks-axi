@@ -245,6 +245,7 @@ done_keep = 10
 ```
 
 `archive` is optional; when omitted, pruned tasks are appended to `done-archive.md` next to the active backlog.
+The archive keeps one record per task id: pruning a task whose id is already archived removes it from the backlog without appending a second record.
 Body replacements with `--archive-body` append superseded bodies to `note-archive.md` next to the active backlog.
 
 ## Backends

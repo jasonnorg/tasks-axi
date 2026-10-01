@@ -12,7 +12,8 @@ import {
   unblockCommand,
   unholdCommand,
 } from "../../src/commands/state.js";
-import { listCommand } from "../../src/commands/crud.js";
+import { addCommand, listCommand } from "../../src/commands/crud.js";
+import { pruneCommand } from "../../src/commands/maintain.js";
 import { makeBacklog } from "../helpers.js";
 
 describe("state commands", () => {
@@ -210,6 +211,44 @@ describe("state commands", () => {
       try {
         await doneCommand(["cert-cleanup", "--keep", "2"], b.ctx);
         expect(b.archive()).toContain("## Archived");
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("does not duplicate an archived id when a re-added task is completed", async () => {
+      const b = makeBacklog(
+        [
+          "# Backlog",
+          "",
+          "## Queued",
+          "",
+          "## Done",
+          "- [x] decision-a1 - captain decision with full title (closed 2026-06-01)",
+          "",
+        ].join("\n"),
+        "2026-07-01",
+      );
+      const records = () =>
+        b
+          .archive()
+          .split("\n")
+          .filter((line) => line.startsWith("- [x] decision-a1 - "));
+      try {
+        await pruneCommand(["--keep", "0"], b.ctx);
+        expect(records()).toHaveLength(1);
+        const archived = b.archive();
+
+        // The same id re-enters the backlog (here with a stripped title) and
+        // is completed again; done's auto-prune must not re-archive it.
+        await addCommand(["decision-a1", "decision-a1"], b.ctx);
+        const out = await doneCommand(["decision-a1", "--keep", "0"], b.ctx);
+        expect(out).toContain("done decision-a1 -> Done");
+        expect(b.read()).not.toContain("decision-a1");
+        expect(b.archive()).toBe(archived);
+        expect(records()).toEqual([
+          "- [x] decision-a1 - captain decision with full title (closed 2026-06-01)",
+        ]);
       } finally {
         b.cleanup();
       }
