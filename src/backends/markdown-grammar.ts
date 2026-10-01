@@ -97,6 +97,20 @@ function matchTaskBullet(
   return matchOne(line, IN_FLIGHT_RE) ?? matchOne(line, QUEUED_RE);
 }
 
+/**
+ * The id of a column-0 task bullet in any state's form, or undefined. Used to
+ * find the task ids an archive already holds, where the bullet form depends
+ * on which section the task was pruned from.
+ */
+export function taskBulletId(line: string): string | undefined {
+  const semantic = semanticLine(line);
+  return (
+    matchOne(semantic, DONE_RE) ??
+    matchOne(semantic, QUEUED_RE) ??
+    matchOne(semantic, IN_FLIGHT_RE)
+  )?.id;
+}
+
 // ---------------------------------------------------------------------------
 // Inline tag extraction (canonical fields) + link/kind derivation
 // ---------------------------------------------------------------------------

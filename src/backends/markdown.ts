@@ -51,6 +51,7 @@ import {
   parseBacklog,
   renderBacklog,
   renderTaskLines,
+  taskBulletId,
 } from "./markdown-grammar.js";
 
 export interface MarkdownStoreOptions {
@@ -1186,9 +1187,9 @@ export class MarkdownStore implements Store {
         (index) => section.entries[index] as TaskEntry,
       );
       const archivedIds = surplusEntries.map((entry) => entry.task.id);
-      const archivedLines = surplusEntries.flatMap((entry) =>
-        entry.raw.length > 0 ? entry.raw : renderTaskLines(entry.task),
-      );
+      const archivedLines = options.archive
+        ? this.unarchivedLines(surplusEntries)
+        : [];
 
       // Remove from the bottom up so earlier indices stay valid.
       for (const index of [...surplus].reverse()) {
@@ -1196,7 +1197,7 @@ export class MarkdownStore implements Store {
       }
 
       let archiveRestorePoint: ArchiveRestorePoint | undefined;
-      if (options.archive) {
+      if (archivedLines.length > 0) {
         this.assertUnchanged(loaded);
         archiveRestorePoint = this.captureArchiveRestorePoint();
         this.appendArchive(archivedLines);
@@ -1208,6 +1209,26 @@ export class MarkdownStore implements Store {
         throw error;
       }
       return { archived: archivedIds.length, ids: archivedIds };
+    });
+  }
+
+  /**
+   * The archive lines for `entries`, holding at most one record per task id.
+   * A task whose id the archive already holds (or that repeats earlier in the
+   * batch) still leaves the backlog but is not appended again: the first
+   * archived record stays the id's only one, so the archive remains
+   * append-only and never rewrites a record a reader may already rely on.
+   */
+  private unarchivedLines(entries: TaskEntry[]): string[] {
+    const archived = new Set<string>();
+    for (const line of (readFileSafe(this.archivePath) ?? "").split("\n")) {
+      const id = taskBulletId(line);
+      if (id) archived.add(id);
+    }
+    return entries.flatMap((entry) => {
+      if (archived.has(entry.task.id)) return [];
+      archived.add(entry.task.id);
+      return entry.raw.length > 0 ? entry.raw : renderTaskLines(entry.task);
     });
   }
 

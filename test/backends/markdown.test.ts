@@ -1,10 +1,12 @@
 import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MarkdownStore } from "../../src/backends/markdown.js";
 import { readyTasks } from "../../src/derive.js";
 import { AxiError } from "../../src/errors.js";
 import {
   FIRSTMATE_FIXTURE,
+  FIXTURE,
   makeBacklog,
   MULTI_REASON_FIXTURE,
 } from "../helpers.js";
@@ -14,6 +16,24 @@ type MarkdownInternals = {
   appendNoteArchive(lines: string[]): void;
   persist(loaded: unknown): void;
 };
+
+/** How many archived records carry `id` (any task bullet form). */
+function archivedRecords(archive: string, id: string): number {
+  return archive
+    .split("\n")
+    .filter(
+      (line) =>
+        line.startsWith(`- [x] ${id} - `) ||
+        line.startsWith(`- [ ] ${id} - `) ||
+        line.startsWith(`- **${id}** - `),
+    ).length;
+}
+
+function fixtureLine(prefix: string): string {
+  const line = FIXTURE.split("\n").find((l) => l.startsWith(prefix));
+  if (!line) throw new Error(`fixture has no line starting ${prefix}`);
+  return line;
+}
 
 describe("MarkdownStore", () => {
   describe("create / get / list", () => {
@@ -1345,6 +1365,174 @@ describe("MarkdownStore", () => {
         });
         expect(b.archive()).toBe("");
         expect(b.read()).toContain("- [x] multi-line-w8");
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("does not re-archive a task id the archive already holds", async () => {
+      const b = makeBacklog();
+      const seed = [
+        "",
+        "## Archived 2026-06-01",
+        "- [x] multi-line-w8 - SCOUT - original archived record (repo: old) (reported 2026-06-01)",
+        "  resolution recorded after archival",
+        "",
+      ].join("\n");
+      try {
+        writeFileSync(join(b.dir, "done-archive.md"), seed, "utf8");
+        const result = await b.store.prune({
+          state: "done",
+          keep: 2,
+          archive: true,
+        });
+        // Selection is unchanged: both surplus tasks leave the backlog.
+        expect(result.ids).toEqual(["fork-fix-k4", "multi-line-w8"]);
+        expect(b.read()).not.toContain("- [x] multi-line-w8");
+        expect(b.read()).not.toContain("- [x] fork-fix-k4");
+        // The existing record is kept byte-exact and is the only one for the
+        // id; the fresh id is appended verbatim as before.
+        expect(b.archive()).toBe(
+          `${seed}\n## Archived 2026-07-01\n${fixtureLine("- [x] fork-fix-k4 - ")}\n`,
+        );
+        expect(archivedRecords(b.archive(), "multi-line-w8")).toBe(1);
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("leaves the archive byte-identical when every surplus id is already archived", async () => {
+      const b = makeBacklog();
+      const seed = [
+        "# Done archive",
+        "",
+        "## Archived 2026-06-01",
+        "- [x] fork-fix-k4 - earlier record",
+        "",
+        "## Archived 2026-06-02",
+        "- [x] multi-line-w8 - earlier record",
+        "",
+      ].join("\n");
+      try {
+        writeFileSync(join(b.dir, "done-archive.md"), seed, "utf8");
+        const result = await b.store.prune({
+          state: "done",
+          keep: 2,
+          archive: true,
+        });
+        expect(result.ids).toEqual(["fork-fix-k4", "multi-line-w8"]);
+        expect(b.read()).not.toContain("- [x] multi-line-w8");
+        expect(b.read()).not.toContain("- [x] fork-fix-k4");
+        expect(b.archive()).toBe(seed);
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("recognizes archived ids in every task bullet form", async () => {
+      const b = makeBacklog(
+        [
+          "# Backlog",
+          "",
+          "## Done",
+          "- [x] keep-a1 - keep",
+          "- [x] was-queued-q1 - pruned again",
+          "- [x] was-flight-f1 - pruned again",
+          "",
+        ].join("\n"),
+      );
+      const seed = [
+        "",
+        "## Archived 2026-06-01",
+        "- [ ] was-queued-q1 - pruned from Queued",
+        "- **was-flight-f1** - pruned from In flight",
+        "",
+      ].join("\n");
+      try {
+        writeFileSync(join(b.dir, "done-archive.md"), seed, "utf8");
+        await b.store.prune({ state: "done", keep: 1, archive: true });
+        expect(b.archive()).toBe(seed);
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("archives one record when the pruned section repeats an id", async () => {
+      const b = makeBacklog(
+        [
+          "# Backlog",
+          "",
+          "## Done",
+          "- [x] keep-a1 - keep",
+          "- [x] dup-x1 - first copy",
+          "- [x] dup-x1 - second copy",
+          "",
+        ].join("\n"),
+      );
+      try {
+        await b.store.prune({ state: "done", keep: 1, archive: true });
+        expect(archivedRecords(b.archive(), "dup-x1")).toBe(1);
+        expect(b.archive()).toContain("- [x] dup-x1 - first copy");
+        expect(b.read()).not.toContain("dup-x1");
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("restores a pre-existing archive byte-exact when the active backlog write fails", async () => {
+      const b = makeBacklog();
+      const seed = [
+        "",
+        "## Archived 2026-06-01",
+        "- [x] multi-line-w8 - earlier record",
+        "",
+      ].join("\n");
+      try {
+        writeFileSync(join(b.dir, "done-archive.md"), seed, "utf8");
+        const before = b.read();
+        const internals = b.store as unknown as MarkdownInternals;
+        const originalAppendArchive = internals.appendArchive.bind(b.store);
+        internals.appendArchive = (lines: string[]) => {
+          originalAppendArchive(lines);
+          writeFileSync(
+            b.path,
+            `${b.read()}\nmanual edit after archive append\n`,
+            "utf8",
+          );
+        };
+
+        await expect(
+          b.store.prune({ state: "done", keep: 2, archive: true }),
+        ).rejects.toMatchObject({ code: "CONFLICT" });
+        expect(b.archive()).toBe(seed);
+        expect(b.read()).toBe(`${before}\nmanual edit after archive append\n`);
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("leaves the archive untouched when nothing new is archived and the backlog write fails", async () => {
+      const b = makeBacklog();
+      const seed = [
+        "",
+        "## Archived 2026-06-01",
+        "- [x] fork-fix-k4 - earlier record",
+        "- [x] multi-line-w8 - earlier record",
+        "",
+      ].join("\n");
+      try {
+        writeFileSync(join(b.dir, "done-archive.md"), seed, "utf8");
+        const before = b.read();
+        const internals = b.store as unknown as MarkdownInternals;
+        internals.persist = () => {
+          throw new Error("simulated backlog write failure");
+        };
+
+        await expect(
+          b.store.prune({ state: "done", keep: 2, archive: true }),
+        ).rejects.toThrow("simulated backlog write failure");
+        expect(b.archive()).toBe(seed);
+        expect(b.read()).toBe(before);
       } finally {
         b.cleanup();
       }
